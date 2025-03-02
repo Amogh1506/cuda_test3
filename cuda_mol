@@ -1,0 +1,102 @@
+import cudaq
+import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+import numpy as np
+import json
+import os
+import sys
+import ast
+
+def run_vqe(geometry):
+    # Single precision
+    #   
+    # Double precision
+    # cudaq.set_target("nvidia")
+    cudaq.set_target('nvidia', option = 'fp64')
+
+
+    # Validate geometry
+    if not geometry:
+        raise ValueError("Geometry must contain at least one atom")
+    
+    molecule, data = cudaq.chemistry.create_molecular_hamiltonian(
+        geometry, 
+        'sto-3g',  # You might need a larger basis set for Li
+        charge=0,   # Explicitly set charge
+        multiplicity=1  # Explicitly set multiplicity
+    )
+
+    electron_count = data.n_electrons
+    qubit_count = 2 * data.n_orbitals
+
+    @cudaq.kernel
+    def kernel(thetas: list[float]):
+        qubits = cudaq.qvector(qubit_count)
+        for i in range(electron_count):
+            x(qubits[i])
+        cudaq.kernels.uccsd(qubits, thetas, electron_count, qubit_count)
+
+    parameter_count = cudaq.kernels.uccsd_num_parameters(electron_count,
+                                                        qubit_count)
+
+    optimizer = cudaq.optimizers.COBYLA()
+
+    energy, parameters = cudaq.vqe(kernel,
+                                molecule,
+                                optimizer,
+                                parameter_count=parameter_count)
+
+    # Define a function to minimize
+    def cost(theta):
+        exp_val = cudaq.observe(kernel, molecule, theta).expectation()
+        return exp_val
+
+    exp_vals = []
+
+    def callback(xk):
+        exp_vals.append(cost(xk))
+
+    # Initial variational parameters.
+    np.random.seed(42)
+    x0 = np.random.normal(0, np.pi, parameter_count)
+
+    # Use the scipy optimizer to minimize the function of interest
+    result = minimize(cost,
+                    x0,
+                    method='COBYLA',
+                    callback=callback,
+                    options={'maxiter': 40})
+
+    plt.plot(exp_vals)
+    plt.xlabel('Epochs')
+    plt.ylabel('Energy')
+    plt.title('VQE')
+
+    # # Save the plot to a file
+    # plot_path = "/tmp/vqe_plot.png"
+    # plt.savefig(plot_path)
+
+    # Prepare the response with type and content
+    response = {
+        "exp_Eval": exp_vals,
+        "energy": float(energy)  # Convert to float for JSON serialization
+    }
+    # Print the JSON response
+    print(json.dumps(response))
+
+def main():
+    # Check if geometry argument is provided
+    if len(sys.argv) != 2:
+        print("Usage: python vqe_script.py \"[('H', (0, 0, 0)), ('H', (0, 0, 0.74))]\"")
+        sys.exit(1)
+
+    # Parse the geometry string to Python object
+    try:
+        geometry = ast.literal_eval(sys.argv[1])
+        run_vqe(geometry)
+    except Exception as e:
+        print(f"Error parsing geometry: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
